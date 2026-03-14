@@ -38,7 +38,7 @@ type CostAccumulator = { claudeInput: number; claudeOutput: number; elevenlabsCh
 
 async function processWithClaude(text: string, cost: CostAccumulator): Promise<string> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY no configurada");
+    throw new Error("ANTHROPIC_API_KEY not configured");
   }
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -58,7 +58,7 @@ async function processWithClaude(text: string, cost: CostAccumulator): Promise<s
 
   if (!res.ok) {
     if (res.status === 429) {
-      throw new Error("Claude API: límite de uso alcanzado. Intenta en unos minutos.");
+      throw new Error("Claude API: rate limit reached. Try again in a few minutes.");
     }
     throw new Error(`Claude API error: ${res.status}`);
   }
@@ -71,7 +71,7 @@ async function processWithClaude(text: string, cost: CostAccumulator): Promise<s
 
 async function generateAudio(text: string, cost: CostAccumulator): Promise<Buffer> {
   if (!process.env.ELEVENLABS_API_KEY) {
-    throw new Error("ELEVENLABS_API_KEY no configurada");
+    throw new Error("ELEVENLABS_API_KEY not configured");
   }
 
   const voiceId = process.env.ELEVENLABS_VOICE_ID || "x5IDPSl4ZUbhosMmVFTk";
@@ -113,12 +113,12 @@ async function generateAudio(text: string, cost: CostAccumulator): Promise<Buffe
 
     throw new Error(
       res.status === 429
-        ? "ElevenLabs: límite de uso alcanzado. Intenta en unos minutos."
+        ? "ElevenLabs: rate limit reached. Try again in a few minutes."
         : `ElevenLabs API error: ${res.status}`
     );
   }
 
-  throw new Error("ElevenLabs: reintentos agotados");
+  throw new Error("ElevenLabs: max retries exceeded");
 }
 
 export async function POST(req: NextRequest) {
@@ -137,7 +137,7 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        send({ type: "status", message: "Extrayendo texto...", progress: 5 });
+        send({ type: "status", message: "Extracting text...", progress: 5 });
 
         let text: string;
         const contentType = req.headers.get("content-type") || "";
@@ -145,8 +145,8 @@ export async function POST(req: NextRequest) {
         if (contentType.includes("multipart/form-data")) {
           const formData = await req.formData();
           const file = formData.get("file") as File;
-          if (!file) throw new Error("No se recibió ningún archivo");
-          if (file.size > 50 * 1024 * 1024) throw new Error("El archivo es demasiado grande (máx. 50MB)");
+          if (!file) throw new Error("No file received");
+          if (file.size > 50 * 1024 * 1024) throw new Error("File too large (max 50MB)");
           const buffer = Buffer.from(await file.arrayBuffer());
           text = await extractFromPdf(buffer);
         } else {
@@ -154,21 +154,21 @@ export async function POST(req: NextRequest) {
           try {
             body = await req.json();
           } catch {
-            throw new Error("Solicitud inválida");
+            throw new Error("Invalid request");
           }
           const url = body.url;
-          if (!url) throw new Error("No se proporcionó una URL");
+          if (!url) throw new Error("No URL provided");
 
           try {
             new URL(url);
           } catch {
-            throw new Error("La URL proporcionada no es válida");
+            throw new Error("Invalid URL");
           }
 
           const inputType = detectInputType(url);
           if (inputType === "pdf-url") {
             const res = await fetch(url);
-            if (!res.ok) throw new Error(`No se pudo descargar el PDF (${res.status})`);
+            if (!res.ok) throw new Error(`Could not download PDF (${res.status})`);
             const buffer = Buffer.from(await res.arrayBuffer());
             text = await extractFromPdf(buffer);
           } else if (inputType === "gdoc") {
@@ -178,16 +178,16 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        if (!text.trim()) throw new Error("No se pudo extraer texto del documento");
+        if (!text.trim()) throw new Error("Could not extract text from document");
 
-        send({ type: "status", message: "Texto extraído. Preparando audio...", progress: 15 });
+        send({ type: "status", message: "Text extracted. Preparing audio...", progress: 15 });
 
         const chunks = splitIntoChunks(text);
         const totalChunks = chunks.length;
 
         send({
           type: "status",
-          message: `Procesando ${totalChunks} segmento${totalChunks > 1 ? "s" : ""}...`,
+          message: `Processing ${totalChunks} segment${totalChunks > 1 ? "s" : ""}...`,
           progress: 20,
         });
 
@@ -227,7 +227,7 @@ export async function POST(req: NextRequest) {
             });
             send({
               type: "status",
-              message: `Segmento ${nextToSend + 1} de ${totalChunks} listo`,
+              message: `Segment ${nextToSend + 1} of ${totalChunks} ready`,
               progress: Math.round(progress),
             });
             results.delete(nextToSend);
@@ -250,7 +250,7 @@ export async function POST(req: NextRequest) {
         if (!cancelled) {
           send({
             type: "error",
-            message: error instanceof Error ? error.message : "Error desconocido",
+            message: error instanceof Error ? error.message : "Unknown error",
           });
         }
       } finally {

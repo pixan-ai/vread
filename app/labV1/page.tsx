@@ -101,13 +101,13 @@ export default function LabV1() {
       <canvas ref={canvasRef} />
       <div className="text-center mt-6">
         <p className="text-neutral-500 text-lg sm:text-xl mb-10 leading-relaxed">
-          Pega un link. Escucha en segundos.
+          Paste a link. Listen in seconds.
         </p>
         <a
           href="/read"
           className="bg-white hover:bg-neutral-200 text-neutral-950 font-medium px-8 py-4 rounded-xl text-lg transition-colors"
         >
-          Comenzar
+          Get started
         </a>
       </div>
     </main>

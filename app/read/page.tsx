@@ -34,7 +34,6 @@ export default function ReadPage() {
 
   const RATES = [1, 1.25, 1.5, 2] as const;
 
-  // Fetch balance on mount
   useEffect(() => {
     fetch("/api/balance")
       .then((r) => r.json())
@@ -42,7 +41,7 @@ export default function ReadPage() {
       .catch(() => {});
   }, []);
 
-  // --- Audio engine: sequential chunk playback ---
+  // --- Audio engine ---
 
   function elapsed(i: number) {
     let t = 0;
@@ -100,7 +99,6 @@ export default function ReadPage() {
     if (i === 0) {
       setHasAudio(true);
       setStatus("playing");
-      // No autoplay — user taps play
     } else if (waiting.current) {
       playAt(i);
     }
@@ -121,7 +119,7 @@ export default function ReadPage() {
   async function convert(body: BodyInit, headers: Record<string, string> = {}) {
     cleanup();
     setStatus("processing");
-    setMessage("Conectando...");
+    setMessage("Connecting...");
     setProgress(0);
     setError("");
     setHasAudio(false);
@@ -129,7 +127,7 @@ export default function ReadPage() {
 
     try {
       const res = await fetch("/api/convert", { method: "POST", headers, body });
-      if (!res.ok || !res.body) throw new Error(`Error del servidor: ${res.status}`);
+      if (!res.ok || !res.body) throw new Error(`Server error: ${res.status}`);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -169,21 +167,20 @@ export default function ReadPage() {
             });
           } else if (evt.type === "complete") {
             done.current = true;
-            setMessage("Listo");
+            setMessage("Done");
             setProgress(100);
-            // Refresh balance after conversion
             fetch("/api/balance")
               .then((r) => r.json())
               .then(setBalance)
               .catch(() => {});
           } else if (evt.type === "error") {
-            throw new Error((evt.message as string) || "Error desconocido");
+            throw new Error((evt.message as string) || "Unknown error");
           }
         }
       }
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : "Error desconocido");
+      setError(err instanceof Error ? err.message : "Unknown error");
     }
   }
 
@@ -204,13 +201,10 @@ export default function ReadPage() {
 
   function togglePlay() {
     const a = audio.current;
-
-    // First play — no audio element yet, start from chunk 0
     if (!a) {
       if (chunks.current.length > 0) playAt(0);
       return;
     }
-
     if (a.paused) {
       a.play();
       setPlaying(true);
@@ -263,13 +257,13 @@ export default function ReadPage() {
 
   return (
     <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-8 pb-48 max-w-2xl mx-auto">
-      {/* Header with back button */}
+      {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <a href="/" className="flex items-center gap-2 text-neutral-500 hover:text-white transition-colors min-h-[44px]">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          <span className="text-sm">Inicio</span>
+          <span className="text-sm">Home</span>
         </a>
         <span className="text-xl font-bold">
           vread<span className="text-neutral-500">.me</span>
@@ -277,7 +271,7 @@ export default function ReadPage() {
         <div className="w-16" />
       </div>
 
-      {/* Balance dashboard */}
+      {/* Balance */}
       {balance?.elevenlabs && (
         <div className="flex gap-3 mb-6 text-xs">
           <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
@@ -293,7 +287,7 @@ export default function ReadPage() {
           <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
             <span className="text-neutral-500 block">Claude</span>
             <span className="text-white">
-              {balance.anthropic?.status === "configured" ? "Activa" : "No configurada"}
+              {balance.anthropic?.status === "configured" ? "Active" : "Not configured"}
             </span>
           </div>
         </div>
@@ -305,7 +299,7 @@ export default function ReadPage() {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Pega un link (web, PDF, Google Doc)"
+          placeholder="Paste a link (web, PDF, Google Doc)"
           className="w-full bg-neutral-900 border border-white/10 rounded-xl px-4 py-4 text-base placeholder:text-neutral-600 focus:outline-none focus:border-white/30 transition-colors"
           disabled={status === "processing"}
         />
@@ -316,13 +310,13 @@ export default function ReadPage() {
             disabled={!url.trim() || status === "processing"}
             className="flex-1 bg-white hover:bg-neutral-200 disabled:opacity-30 disabled:cursor-not-allowed text-neutral-950 font-medium py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
           >
-            {status === "processing" ? "Procesando..." : "Convertir a Audio"}
+            {status === "processing" ? "Processing..." : "Convert to Audio"}
           </button>
           <button
             onClick={() => fileInput.current?.click()}
             disabled={status === "processing"}
             className="bg-neutral-900 border border-white/10 hover:bg-neutral-800 disabled:opacity-30 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
-            aria-label="Subir PDF"
+            aria-label="Upload PDF"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
@@ -353,20 +347,6 @@ export default function ReadPage() {
         </div>
       )}
 
-      {/* Cost estimate after completion */}
-      {cost && (
-        <div className="mt-4 flex gap-3 text-xs">
-          <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
-            <span className="text-neutral-500 block">Costo estimado</span>
-            <span className="text-white tabular-nums">${cost.total.toFixed(3)} USD</span>
-          </div>
-          <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5 text-neutral-500">
-            <span className="block">Claude ${cost.claude.toFixed(3)}</span>
-            <span className="block">ElevenLabs ${cost.elevenlabs.toFixed(3)}</span>
-          </div>
-        </div>
-      )}
-
       {hasAudio && (
         <div
           className="fixed bottom-0 left-0 right-0 bg-neutral-900/95 backdrop-blur-sm border-t border-white/10 px-4 pt-4 sm:static sm:mt-8 sm:rounded-xl sm:border sm:border-white/10 sm:bg-neutral-900 sm:pb-4"
@@ -390,7 +370,7 @@ export default function ReadPage() {
             <button
               onClick={togglePlay}
               className="w-12 h-12 flex items-center justify-center bg-white rounded-full hover:bg-neutral-200 transition-colors active:scale-95"
-              aria-label={playing ? "Pausar" : "Reproducir"}
+              aria-label={playing ? "Pause" : "Play"}
             >
               {playing ? (
                 <svg className="w-5 h-5 text-neutral-950" fill="currentColor" viewBox="0 0 24 24">
@@ -414,7 +394,7 @@ export default function ReadPage() {
               <button
                 onClick={download}
                 className="text-neutral-400 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors active:scale-95"
-                aria-label="Descargar MP3"
+                aria-label="Download MP3"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -426,6 +406,13 @@ export default function ReadPage() {
           {status === "processing" && (
             <p className="text-xs text-neutral-500 mt-2 text-center">
               {message} — {progress}%
+            </p>
+          )}
+
+          {/* Cost — tiny, below player controls */}
+          {cost && (
+            <p className="text-[10px] text-neutral-600 mt-2 text-center tabular-nums">
+              Cost: ${cost.total.toFixed(3)} (Claude ${cost.claude.toFixed(3)} + ElevenLabs ${cost.elevenlabs.toFixed(3)})
             </p>
           )}
         </div>

@@ -5,8 +5,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "vread.me — Escucha cualquier documento",
-  description: "Convierte documentos y páginas web en audio hablado en español. Pega un link o sube un PDF y empieza a escuchar en segundos.",
+  title: "vread.me — Listen to any document",
+  description: "Turn documents and web pages into spoken audio. Paste a link or upload a PDF and start listening in seconds.",
 };
 
 export const viewport: Viewport = {
@@ -18,7 +18,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="es" className={inter.className}>
+    <html lang="en" className={inter.className}>
       <body className="bg-neutral-950 text-neutral-200">{children}</body>
     </html>
   );

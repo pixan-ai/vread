@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const SAMPLE_TEXT =
-  "La inteligencia artificial está transformando la manera en que consumimos información. Documentos largos, artículos técnicos y reportes que antes requerían horas de lectura, ahora pueden convertirse en audio de alta calidad en cuestión de segundos. Solo necesitas un enlace.";
+  "Artificial intelligence is transforming the way we consume information. Long documents, technical articles and reports that once required hours of reading can now be converted into high-quality audio in a matter of seconds. All you need is a link.";
 
 function getWordDelay(word: string): number {
   if (/[.,;:]$/.test(word)) return 320;
@@ -113,7 +113,7 @@ export default function LabV2() {
               href="/read"
               className="bg-white hover:bg-neutral-200 text-neutral-950 font-medium px-8 py-4 rounded-xl text-lg transition-colors"
             >
-              Comenzar
+              Get started
             </a>
           </div>
         </div>

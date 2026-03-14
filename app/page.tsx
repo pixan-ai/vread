@@ -5,14 +5,14 @@ export default function Home() {
         vread<span className="text-neutral-500">.me</span>
       </h1>
       <p className="text-neutral-500 text-lg sm:text-xl max-w-md mb-10 leading-relaxed">
-        Pega un link o sube un PDF.<br />
-        Escucha en segundos.
+        Paste a link or upload a PDF.<br />
+        Listen in seconds.
       </p>
       <a
         href="/read"
         className="bg-white hover:bg-neutral-200 text-neutral-950 font-medium px-8 py-4 rounded-xl text-lg transition-colors"
       >
-        Comenzar
+        Get started
       </a>
     </main>
   );
