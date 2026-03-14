@@ -1,8 +1,13 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 
 type ChunkInfo = { url: string; duration: number };
+type Balance = {
+  elevenlabs: { used: number; limit: number; remaining: number } | null;
+  anthropic: { status: string } | null;
+};
+type Cost = { claude: number; elevenlabs: number; total: number };
 
 export default function ReadPage() {
   const [url, setUrl] = useState("");
@@ -15,6 +20,8 @@ export default function ReadPage() {
   const [dur, setDur] = useState(0);
   const [rate, setRate] = useState(1);
   const [hasAudio, setHasAudio] = useState(false);
+  const [balance, setBalance] = useState<Balance | null>(null);
+  const [cost, setCost] = useState<Cost | null>(null);
 
   const chunks = useRef<ChunkInfo[]>([]);
   const buffers = useRef<ArrayBuffer[]>([]);
@@ -26,6 +33,14 @@ export default function ReadPage() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   const RATES = [1, 1.25, 1.5, 2] as const;
+
+  // Fetch balance on mount
+  useEffect(() => {
+    fetch("/api/balance")
+      .then((r) => r.json())
+      .then(setBalance)
+      .catch(() => {});
+  }, []);
 
   // --- Audio engine: sequential chunk playback ---
 
@@ -85,7 +100,7 @@ export default function ReadPage() {
     if (i === 0) {
       setHasAudio(true);
       setStatus("playing");
-      playAt(0);
+      // No autoplay — user taps play
     } else if (waiting.current) {
       playAt(i);
     }
@@ -110,6 +125,7 @@ export default function ReadPage() {
     setProgress(0);
     setError("");
     setHasAudio(false);
+    setCost(null);
 
     try {
       const res = await fetch("/api/convert", { method: "POST", headers, body });
@@ -130,7 +146,7 @@ export default function ReadPage() {
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
 
-          let evt: { type: string; message?: string; progress?: number; data?: string };
+          let evt: Record<string, unknown>;
           try {
             evt = JSON.parse(line.slice(6));
           } catch {
@@ -138,19 +154,30 @@ export default function ReadPage() {
           }
 
           if (evt.type === "status") {
-            setMessage(evt.message || "");
-            setProgress(evt.progress || 0);
+            setMessage((evt.message as string) || "");
+            setProgress((evt.progress as number) || 0);
           } else if (evt.type === "audio_chunk" && evt.data) {
-            const raw = atob(evt.data);
+            const raw = atob(evt.data as string);
             const bytes = new Uint8Array(raw.length);
             for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
             addChunk(bytes.buffer);
+          } else if (evt.type === "cost") {
+            setCost({
+              claude: evt.claude as number,
+              elevenlabs: evt.elevenlabs as number,
+              total: evt.total as number,
+            });
           } else if (evt.type === "complete") {
             done.current = true;
             setMessage("Listo");
             setProgress(100);
+            // Refresh balance after conversion
+            fetch("/api/balance")
+              .then((r) => r.json())
+              .then(setBalance)
+              .catch(() => {});
           } else if (evt.type === "error") {
-            throw new Error(evt.message || "Error desconocido");
+            throw new Error((evt.message as string) || "Error desconocido");
           }
         }
       }
@@ -176,12 +203,19 @@ export default function ReadPage() {
   }
 
   function togglePlay() {
-    if (!audio.current) return;
-    if (audio.current.paused) {
-      audio.current.play();
+    const a = audio.current;
+
+    // First play — no audio element yet, start from chunk 0
+    if (!a) {
+      if (chunks.current.length > 0) playAt(0);
+      return;
+    }
+
+    if (a.paused) {
+      a.play();
       setPlaying(true);
     } else {
-      audio.current.pause();
+      a.pause();
       setPlaying(false);
     }
   }
@@ -219,13 +253,51 @@ export default function ReadPage() {
     return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, "0")}`;
   }
 
+  function fmtK(n: number) {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(0)}K`;
+    return n.toString();
+  }
+
   // --- UI ---
 
   return (
-    <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-12 pb-48 max-w-2xl mx-auto">
-      <a href="/" className="text-xl font-bold mb-10 inline-block">
-        vread<span className="text-neutral-500">.me</span>
-      </a>
+    <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-8 pb-48 max-w-2xl mx-auto">
+      {/* Header with back button */}
+      <div className="flex items-center justify-between mb-8">
+        <a href="/" className="flex items-center gap-2 text-neutral-500 hover:text-white transition-colors min-h-[44px]">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          <span className="text-sm">Inicio</span>
+        </a>
+        <span className="text-xl font-bold">
+          vread<span className="text-neutral-500">.me</span>
+        </span>
+        <div className="w-16" />
+      </div>
+
+      {/* Balance dashboard */}
+      {balance?.elevenlabs && (
+        <div className="flex gap-3 mb-6 text-xs">
+          <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
+            <span className="text-neutral-500 block">ElevenLabs</span>
+            <span className="text-white tabular-nums">
+              {fmtK(balance.elevenlabs.remaining)} chars
+            </span>
+            <span className="text-neutral-600">
+              {" / "}
+              {fmtK(balance.elevenlabs.limit)}
+            </span>
+          </div>
+          <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
+            <span className="text-neutral-500 block">Claude</span>
+            <span className="text-white">
+              {balance.anthropic?.status === "configured" ? "Activa" : "No configurada"}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-3">
         <input
@@ -278,6 +350,20 @@ export default function ReadPage() {
       {status === "error" && (
         <div className="mt-8 bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl text-sm">
           {error}
+        </div>
+      )}
+
+      {/* Cost estimate after completion */}
+      {cost && (
+        <div className="mt-4 flex gap-3 text-xs">
+          <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
+            <span className="text-neutral-500 block">Costo estimado</span>
+            <span className="text-white tabular-nums">${cost.total.toFixed(3)} USD</span>
+          </div>
+          <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5 text-neutral-500">
+            <span className="block">Claude ${cost.claude.toFixed(3)}</span>
+            <span className="block">ElevenLabs ${cost.elevenlabs.toFixed(3)}</span>
+          </div>
         </div>
       )}
 

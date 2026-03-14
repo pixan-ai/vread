@@ -28,7 +28,15 @@ function sseEvent(data: object): string {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
 
-async function processWithClaude(text: string): Promise<string> {
+// Cost tracking (Sonnet: $3/M input, $15/M output)
+const SONNET_INPUT_COST = 3 / 1_000_000;
+const SONNET_OUTPUT_COST = 15 / 1_000_000;
+// ElevenLabs: ~$0.30 per 1000 characters (varies by plan)
+const ELEVENLABS_COST_PER_CHAR = 0.30 / 1000;
+
+type CostAccumulator = { claudeInput: number; claudeOutput: number; elevenlabsChars: number };
+
+async function processWithClaude(text: string, cost: CostAccumulator): Promise<string> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY no configurada");
   }
@@ -56,10 +64,12 @@ async function processWithClaude(text: string): Promise<string> {
   }
 
   const data = await res.json();
+  cost.claudeInput += data.usage?.input_tokens ?? 0;
+  cost.claudeOutput += data.usage?.output_tokens ?? 0;
   return data.content[0].text;
 }
 
-async function generateAudio(text: string): Promise<Buffer> {
+async function generateAudio(text: string, cost: CostAccumulator): Promise<Buffer> {
   if (!process.env.ELEVENLABS_API_KEY) {
     throw new Error("ELEVENLABS_API_KEY no configurada");
   }
@@ -90,6 +100,7 @@ async function generateAudio(text: string): Promise<Buffer> {
     );
 
     if (res.ok) {
+      cost.elevenlabsChars += text.length;
       return Buffer.from(await res.arrayBuffer());
     }
 
@@ -180,11 +191,13 @@ export async function POST(req: NextRequest) {
           progress: 20,
         });
 
+        const cost: CostAccumulator = { claudeInput: 0, claudeOutput: 0, elevenlabsChars: 0 };
+
         const processChunk = async (chunk: string, index: number) => {
           if (cancelled) return null;
-          const spokenText = await processWithClaude(chunk);
+          const spokenText = await processWithClaude(chunk, cost);
           if (cancelled) return null;
-          const audioBuffer = await generateAudio(spokenText);
+          const audioBuffer = await generateAudio(spokenText, cost);
           return { index, audioBase64: audioBuffer.toString("base64") };
         };
 
@@ -222,7 +235,17 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        if (!cancelled) send({ type: "complete" });
+        if (!cancelled) {
+          const claudeCost = cost.claudeInput * SONNET_INPUT_COST + cost.claudeOutput * SONNET_OUTPUT_COST;
+          const elevenlabsCost = cost.elevenlabsChars * ELEVENLABS_COST_PER_CHAR;
+          send({
+            type: "cost",
+            claude: Math.round(claudeCost * 1000) / 1000,
+            elevenlabs: Math.round(elevenlabsCost * 1000) / 1000,
+            total: Math.round((claudeCost + elevenlabsCost) * 1000) / 1000,
+          });
+          send({ type: "complete" });
+        }
       } catch (error) {
         if (!cancelled) {
           send({
