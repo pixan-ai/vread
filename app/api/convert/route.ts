@@ -19,6 +19,7 @@ REGLAS:
 5. Todo debe ser texto plano narrativo. Sin markdown, sin bullets, sin asteriscos.
 6. Números escritos para lectura natural: "15,000" → "quince mil".
 7. Transiciones suaves entre secciones.
+8. Usa puntuación variada para crear ritmo natural: combina oraciones cortas con oraciones más largas. Agrega comas donde haya pausas naturales al hablar. Evita que todas las oraciones tengan la misma longitud.
 
 Responde SOLO con el texto procesado.`;
 
@@ -61,11 +62,12 @@ async function generateAudio(text: string): Promise<Buffer> {
       },
       body: JSON.stringify({
         text,
-        model_id: "eleven_multilingual_v2",
+        model_id: "eleven_turbo_v2_5",
         voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
+          stability: 0.3,
+          similarity_boost: 0.85,
           style: 0,
+          use_speaker_boost: true,
         },
         output_format: "mp3_44100_128",
       }),
