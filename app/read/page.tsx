@@ -45,9 +45,9 @@ class AudioEngine {
   }
 
   get currentTime(): number {
-    if (!this._playing) return this.chunkElapsed(this.chunkIdx) + this.offset;
+    if (!this._playing || !this.source) return this.chunkElapsed(this.chunkIdx) + this.offset;
     const played = (this.ctx.currentTime - this.playStart) * this._rate;
-    return this.chunkElapsed(this.chunkIdx) + this.offset + played;
+    return Math.min(this.chunkElapsed(this.chunkIdx) + this.offset + played, this.duration);
   }
 
   get duration(): number {
@@ -63,13 +63,15 @@ class AudioEngine {
   }
 
   async addChunk(data: ArrayBuffer) {
+    const index = this.raw.length;
     this.raw.push(data);
     // decodeAudioData detaches the buffer, so clone first
     const buffer = await this.ctx.decodeAudioData(data.slice(0));
-    this.buffers.push(buffer);
+    // Ensure order: insert at the correct index in case of async race
+    this.buffers[index] = buffer;
 
-    if (this.buffers.length === 1) {
-      this.play();
+    if (index === 0) {
+      await this.play();
     } else if (this._playing && !this.source) {
       // Was waiting for next chunk
       this.playChunk(this.chunkIdx);
@@ -77,9 +79,9 @@ class AudioEngine {
     this.onUpdate();
   }
 
-  play() {
+  async play() {
     if (this._playing) return;
-    this.ctx.resume();
+    await this.ctx.resume();
     this._playing = true;
     this.playChunk(this.chunkIdx);
     this.onUpdate();
@@ -95,12 +97,14 @@ class AudioEngine {
   }
 
   seek(time: number) {
+    if (!this.buffers.length) return;
+    const clamped = Math.max(0, Math.min(time, this.duration));
     for (let i = 0; i < this.buffers.length; i++) {
       const start = this.chunkElapsed(i);
       const end = start + this.buffers[i].duration;
-      if (time < end || i === this.buffers.length - 1) {
+      if (clamped < end || i === this.buffers.length - 1) {
         this.chunkIdx = i;
-        this.offset = Math.max(0, time - start);
+        this.offset = Math.max(0, clamped - start);
         if (this._playing) {
           this.stopSource();
           this.playChunk(i);
@@ -240,6 +244,9 @@ export default function ReadPage() {
     return () => clearInterval(timerRef.current);
   }, [playing]);
 
+  // Cleanup engine on unmount
+  useEffect(() => () => engineRef.current?.destroy(), []);
+
   // Fetch balance on mount
   useEffect(() => {
     fetch("/api/balance")
@@ -333,12 +340,14 @@ export default function ReadPage() {
               break;
 
             case "error":
+              engine.setDone();
               throw new Error((evt.message as string) || "Unknown error");
           }
         }
       }
     } catch (err) {
       if (ctrl.signal.aborted) return;
+      engineRef.current?.setDone();
       setStatus("error");
       setError(err instanceof Error ? err.message : "Unknown error");
     }

@@ -6,7 +6,7 @@ import {
   extractFromWebpage,
   splitIntoChunks,
 } from "@/lib/extract";
-import { createTrace } from "@/lib/logger";
+import { createTrace, type Trace } from "@/lib/logger";
 import { claudeLimit, elevenlabsLimit } from "@/lib/queue";
 import { getVoice, type VoiceRole } from "@/lib/voices";
 
@@ -41,7 +41,7 @@ REGLAS:
 Responde SOLO con el texto procesado usando las etiquetas de voz.`;
 
 // Parse Claude's role-annotated output into voice segments
-function parseSegments(text: string): Segment[] {
+function parseSegments(text: string, trace: Trace): Segment[] {
   const segments: Segment[] = [];
   const re = /\[(narrator|quote|data)\]([\s\S]*?)\[\/\1\]/g;
   let last = 0;
@@ -59,7 +59,13 @@ function parseSegments(text: string): Segment[] {
 
   const tail = text.slice(last).trim();
   if (tail) segments.push({ text: tail, role: "narrator" });
-  return segments.length ? segments : [{ text: text.trim(), role: "narrator" }];
+
+  if (last === 0 && text.trim()) {
+    trace.warn("parseSegments.noTags", { chars: text.length });
+    return [{ text: text.trim(), role: "narrator" }];
+  }
+
+  return segments;
 }
 
 // Stream Claude response, return accumulated text + token usage
@@ -69,6 +75,10 @@ async function callClaude(
   cost: CostAcc,
 ): Promise<string> {
   return claudeLimit.run(async () => {
+    // Combine caller signal with a 60s timeout
+    const timeout = AbortSignal.timeout(60_000);
+    const combined = AbortSignal.any([signal, timeout]);
+
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -83,10 +93,11 @@ async function callClaude(
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: text }],
       }),
-      signal,
+      signal: combined,
     });
 
     if (!res.ok) {
+      if (res.status === 401) throw new Error("Claude API: invalid or expired API key. Check ANTHROPIC_API_KEY.");
       if (res.status === 429) throw new Error("Claude API: rate limit reached. Try again in a few minutes.");
       throw new Error(`Claude API error: ${res.status}`);
     }
@@ -171,6 +182,7 @@ async function generateAudio(
         continue;
       }
 
+      if (res.status === 401) throw new Error("ElevenLabs: invalid or expired API key. Check ELEVENLABS_API_KEY.");
       throw new Error(
         res.status === 429
           ? "ElevenLabs: rate limit reached. Try again in a few minutes."
@@ -262,10 +274,10 @@ export async function POST(req: NextRequest) {
         const results = new Map<number, Buffer>();
         let nextToSend = 0;
 
-        // Process in batches of 3, preserving order
+        // Process in batches of 3, preserving order. allSettled so one chunk failure doesn't kill the batch.
         for (let batch = 0; batch < total && !signal.aborted; batch += 3) {
           const batchEnd = Math.min(batch + 3, total);
-          const batchResults = await Promise.all(
+          const settled = await Promise.allSettled(
             chunks.slice(batch, batchEnd).map(async (chunk, i) => {
               const index = batch + i;
               if (signal.aborted) return null;
@@ -274,7 +286,7 @@ export async function POST(req: NextRequest) {
               if (signal.aborted) return null;
 
               // Multi-voice: parse role segments, generate audio for each, concatenate
-              const segments = parseSegments(processed);
+              const segments = parseSegments(processed, trace);
               const audioChunks: Buffer[] = [];
               for (const seg of segments) {
                 if (signal.aborted) return null;
@@ -285,7 +297,12 @@ export async function POST(req: NextRequest) {
             }),
           );
 
-          for (const r of batchResults) {
+          for (const result of settled) {
+            if (result.status === "rejected") {
+              trace.error("chunk.failed", { error: String(result.reason) });
+              continue;
+            }
+            const r = result.value;
             if (!r || signal.aborted) continue;
             results.set(r.index, r.audio);
           }
