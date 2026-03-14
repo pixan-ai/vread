@@ -182,7 +182,7 @@ async function generateAudio(
         continue;
       }
 
-      if (res.status === 401) throw new Error("ElevenLabs: invalid or expired API key. Check ELEVENLABS_API_KEY.");
+      if (res.status === 401) throw new Error("ElevenLabs: API key inválida o expirada. Revisa ELEVENLABS_API_KEY.");
       throw new Error(
         res.status === 429
           ? "ElevenLabs: rate limit reached. Try again in a few minutes."
@@ -273,6 +273,7 @@ export async function POST(req: NextRequest) {
         const cost: CostAcc = { claudeIn: 0, claudeOut: 0, elChars: 0 };
         const results = new Map<number, Buffer>();
         let nextToSend = 0;
+        let firstError: string | null = null;
 
         // Process in batches of 3, preserving order. allSettled so one chunk failure doesn't kill the batch.
         for (let batch = 0; batch < total && !signal.aborted; batch += 3) {
@@ -299,7 +300,9 @@ export async function POST(req: NextRequest) {
 
           for (const result of settled) {
             if (result.status === "rejected") {
-              trace.error("chunk.failed", { error: String(result.reason) });
+              const errMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+              trace.error("chunk.failed", { error: errMsg });
+              if (!firstError) firstError = errMsg;
               continue;
             }
             const r = result.value;
@@ -326,6 +329,11 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // If no audio was produced at all, surface the error
+        if (nextToSend === 0 && !signal.aborted) {
+          throw new Error(firstError || "No audio could be generated. Check API keys and try again.");
+        }
+
         if (!signal.aborted) {
           const claudeCost =
             cost.claudeIn * COST_RATES.claudeInput +
@@ -340,6 +348,8 @@ export async function POST(req: NextRequest) {
           send({ type: "complete" });
           trace.info("pipeline.complete", {
             chunks: total,
+            sent: nextToSend,
+            failed: total - nextToSend,
             tokens: cost.claudeIn + cost.claudeOut,
             chars: cost.elChars,
             cost: Math.round((claudeCost + elCost) * 1000) / 1000,
