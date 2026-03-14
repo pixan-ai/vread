@@ -20,6 +20,7 @@ REGLAS:
 6. Números escritos para lectura natural: "15,000" → "quince mil".
 7. Transiciones suaves entre secciones.
 8. Usa puntuación variada para crear ritmo natural: combina oraciones cortas con oraciones más largas. Agrega comas donde haya pausas naturales al hablar. Evita que todas las oraciones tengan la misma longitud.
+9. Varía la estructura sintáctica: no empieces todas las oraciones igual. Alterna entre sujeto-verbo-complemento, complemento al inicio, oraciones subordinadas, preguntas retóricas y enumeraciones. El texto debe sonar como una persona hablando, no como un robot leyendo.
 
 Responde SOLO con el texto procesado.`;
 
@@ -66,7 +67,7 @@ async function generateAudio(text: string): Promise<Buffer> {
         voice_settings: {
           stability: 0.3,
           similarity_boost: 0.85,
-          style: 0,
+          style: 0.3,
           use_speaker_boost: true,
         },
         output_format: "mp3_44100_128",
