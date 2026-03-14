@@ -40,7 +40,7 @@ export async function extractFromWebpage(url: string): Promise<string> {
   return article.textContent;
 }
 
-export function splitIntoChunks(text: string, maxChars = 4000): string[] {
+export function splitIntoChunks(text: string, maxChars = 2000): string[] {
   const clean = text.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
   if (!clean) return [];
   if (clean.length <= maxChars) return [clean];

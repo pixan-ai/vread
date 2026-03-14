@@ -23,7 +23,6 @@ export default function LabV1() {
       canvas.style.height = h + "px";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      // Draw text offscreen to sample pixel positions
       const off = document.createElement("canvas");
       off.width = w;
       off.height = h;
@@ -32,7 +31,7 @@ export default function LabV1() {
       pSize = Math.max(2, Math.round(fontSize / 35));
       const gap = pSize + 1;
 
-      oc.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
+      oc.font = `bold ${fontSize}px Inter, system-ui, sans-serif`;
       oc.fillStyle = "#fff";
       oc.textAlign = "center";
       oc.textBaseline = "middle";
@@ -62,7 +61,6 @@ export default function LabV1() {
     function draw(t: number) {
       ctx.clearRect(0, 0, w, h);
 
-      // 6-second cycle: text → morph → wave → morph → text
       const cycle = (t % 6000) / 6000;
       let mix: number;
       if (cycle < 0.25) mix = 0;
@@ -71,20 +69,19 @@ export default function LabV1() {
       else if (cycle < 0.75) mix = 1 - (cycle - 0.65) / 0.1;
       else mix = 0;
 
-      // Smoothstep easing
       mix = mix * mix * (3 - 2 * mix);
 
       for (const p of particles) {
         const x = p.tx + (p.wx - p.tx) * mix;
         let y = p.ty + (p.wy - p.ty) * mix;
 
-        // Living wave: particles drift when morphed
         if (mix > 0) {
           y += Math.sin(p.wx * 0.018 + t * 0.0025) * 14 * mix;
         }
 
-        // Color: neutral-200 → indigo-500
-        ctx.fillStyle = `rgb(${Math.round(229 - 130 * mix)},${Math.round(229 - 127 * mix)},${Math.round(229 + 12 * mix)})`;
+        // White → dimmer white when morphed (B&W)
+        const alpha = 1 - mix * 0.3;
+        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
         ctx.fillRect(x, y, pSize, pSize);
       }
 
@@ -103,12 +100,12 @@ export default function LabV1() {
     <main className="min-h-dvh flex flex-col items-center justify-center bg-neutral-950 overflow-hidden">
       <canvas ref={canvasRef} />
       <div className="text-center mt-6">
-        <p className="text-neutral-400 text-lg sm:text-xl mb-10 leading-relaxed">
+        <p className="text-neutral-500 text-lg sm:text-xl mb-10 leading-relaxed">
           Pega un link. Escucha en segundos.
         </p>
         <a
           href="/read"
-          className="bg-indigo-500 hover:bg-indigo-400 text-white font-medium px-8 py-4 rounded-xl text-lg transition-colors"
+          className="bg-white hover:bg-neutral-200 text-neutral-950 font-medium px-8 py-4 rounded-xl text-lg transition-colors"
         >
           Comenzar
         </a>

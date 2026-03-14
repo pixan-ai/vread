@@ -25,7 +25,7 @@ export default function ReadPage() {
   const idx = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const RATES = [1, 1.25, 1.5, 2];
+  const RATES = [1, 1.25, 1.5, 2] as const;
 
   // --- Audio engine: sequential chunk playback ---
 
@@ -74,7 +74,6 @@ export default function ReadPage() {
     const i = chunks.current.length;
     chunks.current.push({ url: chunkUrl, duration: 0 });
 
-    // Probe duration without playing
     const probe = new Audio(chunkUrl);
     probe.onloadedmetadata = () => {
       if (chunks.current[i]) {
@@ -94,7 +93,7 @@ export default function ReadPage() {
 
   function cleanup() {
     audio.current?.pause();
-    chunks.current.forEach(c => URL.revokeObjectURL(c.url));
+    chunks.current.forEach((c) => URL.revokeObjectURL(c.url));
     chunks.current = [];
     buffers.current = [];
     idx.current = 0;
@@ -107,14 +106,14 @@ export default function ReadPage() {
   async function convert(body: BodyInit, headers: Record<string, string> = {}) {
     cleanup();
     setStatus("processing");
-    setMessage("Iniciando...");
+    setMessage("Conectando...");
     setProgress(0);
     setError("");
     setHasAudio(false);
 
     try {
       const res = await fetch("/api/convert", { method: "POST", headers, body });
-      if (!res.ok || !res.body) throw new Error(`Server error: ${res.status}`);
+      if (!res.ok || !res.body) throw new Error(`Error del servidor: ${res.status}`);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -130,12 +129,18 @@ export default function ReadPage() {
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
-          const evt = JSON.parse(line.slice(6));
+
+          let evt: { type: string; message?: string; progress?: number; data?: string };
+          try {
+            evt = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
 
           if (evt.type === "status") {
-            setMessage(evt.message);
-            setProgress(evt.progress);
-          } else if (evt.type === "audio_chunk") {
+            setMessage(evt.message || "");
+            setProgress(evt.progress || 0);
+          } else if (evt.type === "audio_chunk" && evt.data) {
             const raw = atob(evt.data);
             const bytes = new Uint8Array(raw.length);
             for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
@@ -145,7 +150,7 @@ export default function ReadPage() {
             setMessage("Listo");
             setProgress(100);
           } else if (evt.type === "error") {
-            throw new Error(evt.message);
+            throw new Error(evt.message || "Error desconocido");
           }
         }
       }
@@ -194,7 +199,7 @@ export default function ReadPage() {
   }
 
   function cycleRate() {
-    const next = RATES[(RATES.indexOf(rateRef.current) + 1) % RATES.length];
+    const next = RATES[(RATES.indexOf(rateRef.current as (typeof RATES)[number]) + 1) % RATES.length];
     rateRef.current = next;
     setRate(next);
     if (audio.current) audio.current.playbackRate = next;
@@ -217,19 +222,19 @@ export default function ReadPage() {
   // --- UI ---
 
   return (
-    <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-12 pb-40 max-w-2xl mx-auto">
+    <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-12 pb-48 max-w-2xl mx-auto">
       <a href="/" className="text-xl font-bold mb-10 inline-block">
-        vread<span className="text-indigo-500">.me</span>
+        vread<span className="text-neutral-500">.me</span>
       </a>
 
       <div className="space-y-3">
         <input
           type="url"
           value={url}
-          onChange={e => setUrl(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && submit()}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
           placeholder="Pega un link (web, PDF, Google Doc)"
-          className="w-full bg-neutral-900 border border-white/10 rounded-xl px-4 py-4 text-base placeholder:text-neutral-500 focus:outline-none focus:border-indigo-500 transition-colors"
+          className="w-full bg-neutral-900 border border-white/10 rounded-xl px-4 py-4 text-base placeholder:text-neutral-600 focus:outline-none focus:border-white/30 transition-colors"
           disabled={status === "processing"}
         />
 
@@ -237,14 +242,15 @@ export default function ReadPage() {
           <button
             onClick={submit}
             disabled={!url.trim() || status === "processing"}
-            className="flex-1 bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-4 rounded-xl text-base transition-colors"
+            className="flex-1 bg-white hover:bg-neutral-200 disabled:opacity-30 disabled:cursor-not-allowed text-neutral-950 font-medium py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
           >
-            Convertir a Audio
+            {status === "processing" ? "Procesando..." : "Convertir a Audio"}
           </button>
           <button
             onClick={() => fileInput.current?.click()}
             disabled={status === "processing"}
-            className="bg-neutral-900 border border-white/10 hover:bg-neutral-800 disabled:opacity-40 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors"
+            className="bg-neutral-900 border border-white/10 hover:bg-neutral-800 disabled:opacity-30 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
+            aria-label="Subir PDF"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
@@ -256,13 +262,13 @@ export default function ReadPage() {
 
       {status === "processing" && (
         <div className="mt-8 space-y-3">
-          <div className="flex justify-between text-sm text-neutral-400">
+          <div className="flex justify-between text-sm text-neutral-500">
             <span>{message}</span>
             <span>{progress}%</span>
           </div>
-          <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden">
+          <div className="h-1 bg-neutral-900 rounded-full overflow-hidden">
             <div
-              className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+              className="h-full bg-white rounded-full transition-all duration-500"
               style={{ width: `${progress}%` }}
             />
           </div>
@@ -276,7 +282,10 @@ export default function ReadPage() {
       )}
 
       {hasAudio && (
-        <div className="fixed bottom-0 left-0 right-0 bg-neutral-900 border-t border-white/10 px-4 py-4 sm:static sm:mt-8 sm:rounded-xl sm:border sm:border-white/10">
+        <div
+          className="fixed bottom-0 left-0 right-0 bg-neutral-900/95 backdrop-blur-sm border-t border-white/10 px-4 pt-4 sm:static sm:mt-8 sm:rounded-xl sm:border sm:border-white/10 sm:bg-neutral-900 sm:pb-4"
+          style={{ paddingBottom: "calc(16px + env(safe-area-inset-bottom, 0px))" }}
+        >
           <input
             type="range"
             min={0}
@@ -284,41 +293,42 @@ export default function ReadPage() {
             step={0.1}
             value={time}
             onChange={seek}
-            className="w-full h-1.5 mb-3 accent-indigo-500 cursor-pointer"
+            className="w-full mb-3"
           />
 
           <div className="flex items-center justify-between">
-            <span className="text-xs text-neutral-400 w-20">
+            <span className="text-xs text-neutral-500 w-20 tabular-nums">
               {fmt(time)} / {fmt(dur)}
             </span>
 
             <button
               onClick={togglePlay}
-              className="w-12 h-12 flex items-center justify-center bg-indigo-500 rounded-full hover:bg-indigo-400 transition-colors"
+              className="w-12 h-12 flex items-center justify-center bg-white rounded-full hover:bg-neutral-200 transition-colors active:scale-95"
+              aria-label={playing ? "Pausar" : "Reproducir"}
             >
               {playing ? (
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5 text-neutral-950" fill="currentColor" viewBox="0 0 24 24">
                   <rect x="6" y="4" width="4" height="16" />
                   <rect x="14" y="4" width="4" height="16" />
                 </svg>
               ) : (
-                <svg className="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5 text-neutral-950 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
                   <polygon points="5,3 19,12 5,21" />
                 </svg>
               )}
             </button>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               <button
                 onClick={cycleRate}
-                className="text-xs font-medium text-neutral-400 hover:text-white bg-neutral-800 px-2.5 py-1.5 rounded-lg transition-colors"
+                className="text-xs font-medium text-neutral-400 hover:text-white bg-neutral-800 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg transition-colors active:scale-95"
               >
                 {rate}x
               </button>
               <button
                 onClick={download}
-                className="text-neutral-400 hover:text-white transition-colors"
-                title="Descargar MP3"
+                className="text-neutral-400 hover:text-white min-w-[44px] min-h-[44px] flex items-center justify-center transition-colors active:scale-95"
+                aria-label="Descargar MP3"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -328,7 +338,7 @@ export default function ReadPage() {
           </div>
 
           {status === "processing" && (
-            <p className="text-xs text-neutral-400 mt-2 text-center">
+            <p className="text-xs text-neutral-500 mt-2 text-center">
               {message} — {progress}%
             </p>
           )}

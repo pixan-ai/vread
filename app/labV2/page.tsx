@@ -21,7 +21,6 @@ export default function LabV2() {
   const advance = useCallback(
     (index: number) => {
       if (index >= words.length) {
-        // Pause, then restart
         timerRef.current = setTimeout(() => {
           setActive(-1);
           setBars([]);
@@ -32,7 +31,6 @@ export default function LabV2() {
 
       setActive(index);
 
-      // Grow waveform proportionally
       const target = Math.ceil(((index + 1) / words.length) * totalBars);
       setBars((prev) => {
         const next = [...prev];
@@ -64,10 +62,9 @@ export default function LabV2() {
       <main className="min-h-dvh flex flex-col items-center justify-center px-6 bg-neutral-950 overflow-hidden">
         <div className="max-w-2xl w-full">
           <h1 className="text-3xl sm:text-5xl font-bold tracking-tight mb-16 text-center">
-            vread<span className="text-indigo-500">.me</span>
+            vread<span className="text-neutral-500">.me</span>
           </h1>
 
-          {/* Text being consumed */}
           <div className="text-lg sm:text-xl leading-relaxed mb-14 min-h-[140px]">
             {words.map((word, i) => {
               const consumed = i < active;
@@ -79,18 +76,14 @@ export default function LabV2() {
                   key={i}
                   className="inline-block mr-[0.3em] transition-all duration-300 ease-out"
                   style={{
-                    opacity: consumed ? 0 : 1,
+                    opacity: consumed ? 0 : current ? 1 : next ? 0.9 : 0.6,
                     transform: consumed
                       ? "scale(0.85) translateY(-6px)"
                       : current
                         ? "scale(1.02)"
                         : "none",
-                    color: current
-                      ? "#818cf8"
-                      : next
-                        ? "#6366f1"
-                        : "#e5e5e5",
-                    textShadow: current ? "0 0 20px rgba(99,102,241,0.4)" : "none",
+                    color: current ? "#fff" : "#a3a3a3",
+                    textShadow: current ? "0 0 20px rgba(255,255,255,0.25)" : "none",
                   }}
                 >
                   {word}
@@ -99,15 +92,14 @@ export default function LabV2() {
             })}
           </div>
 
-          {/* Growing waveform */}
           <div className="flex items-end justify-center gap-[3px] h-24 mb-16">
             {bars.map((amp, i) => (
               <div
                 key={i}
-                className="w-1.5 sm:w-2 rounded-full bg-indigo-500 origin-bottom"
+                className="w-1.5 sm:w-2 rounded-full bg-white origin-bottom"
                 style={{
                   height: `${amp * 100}%`,
-                  opacity: 0.5 + amp * 0.5,
+                  opacity: 0.4 + amp * 0.6,
                   animation: "bar-breathe 1.8s ease-in-out infinite",
                   animationDelay: `${i * 60}ms`,
                   transition: "height 0.4s ease-out",
@@ -119,7 +111,7 @@ export default function LabV2() {
           <div className="text-center">
             <a
               href="/read"
-              className="bg-indigo-500 hover:bg-indigo-400 text-white font-medium px-8 py-4 rounded-xl text-lg transition-colors"
+              className="bg-white hover:bg-neutral-200 text-neutral-950 font-medium px-8 py-4 rounded-xl text-lg transition-colors"
             >
               Comenzar
             </a>

@@ -29,11 +29,15 @@ function sseEvent(data: object): string {
 }
 
 async function processWithClaude(text: string): Promise<string> {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY no configurada");
+  }
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY!,
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
@@ -43,56 +47,85 @@ async function processWithClaude(text: string): Promise<string> {
       messages: [{ role: "user", content: text }],
     }),
   });
+
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Claude API error: ${res.status} ${err}`);
+    if (res.status === 429) {
+      throw new Error("Claude API: límite de uso alcanzado. Intenta en unos minutos.");
+    }
+    throw new Error(`Claude API error: ${res.status}`);
   }
+
   const data = await res.json();
   return data.content[0].text;
 }
 
 async function generateAudio(text: string): Promise<Buffer> {
-  const voiceId = process.env.ELEVENLABS_VOICE_ID || "x5IDPSl4ZUbhosMmVFTk";
-  const res = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "xi-api-key": process.env.ELEVENLABS_API_KEY!,
-      },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_turbo_v2_5",
-        voice_settings: {
-          stability: 0.3,
-          similarity_boost: 0.85,
-          style: 0.3,
-          use_speaker_boost: true,
-        },
-        output_format: "mp3_44100_128",
-      }),
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`ElevenLabs API error: ${res.status} ${err}`);
+  if (!process.env.ELEVENLABS_API_KEY) {
+    throw new Error("ELEVENLABS_API_KEY no configurada");
   }
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+
+  const voiceId = process.env.ELEVENLABS_VOICE_ID || "x5IDPSl4ZUbhosMmVFTk";
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+        },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_turbo_v2_5",
+          voice_settings: {
+            stability: 0.3,
+            similarity_boost: 0.85,
+            style: 0.3,
+            use_speaker_boost: true,
+          },
+          output_format: "mp3_44100_128",
+        }),
+      }
+    );
+
+    if (res.ok) {
+      return Buffer.from(await res.arrayBuffer());
+    }
+
+    // Retry on rate limit or temporary server error
+    if ((res.status === 429 || res.status === 503) && attempt < 2) {
+      const retryAfter = parseInt(res.headers.get("retry-after") || "3", 10);
+      await new Promise((r) => setTimeout(r, Math.max(retryAfter, 2) * 1000 * (attempt + 1)));
+      continue;
+    }
+
+    throw new Error(
+      res.status === 429
+        ? "ElevenLabs: límite de uso alcanzado. Intenta en unos minutos."
+        : `ElevenLabs API error: ${res.status}`
+    );
+  }
+
+  throw new Error("ElevenLabs: reintentos agotados");
 }
 
 export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
+  let cancelled = false;
 
   const stream = new ReadableStream({
     async start(controller) {
       const send = (data: object) => {
-        controller.enqueue(encoder.encode(sseEvent(data)));
+        if (cancelled) return;
+        try {
+          controller.enqueue(encoder.encode(sseEvent(data)));
+        } catch {
+          cancelled = true;
+        }
       };
 
       try {
-        // Extract text from input
         send({ type: "status", message: "Extrayendo texto...", progress: 5 });
 
         let text: string;
@@ -101,18 +134,30 @@ export async function POST(req: NextRequest) {
         if (contentType.includes("multipart/form-data")) {
           const formData = await req.formData();
           const file = formData.get("file") as File;
-          if (!file) throw new Error("No file provided");
+          if (!file) throw new Error("No se recibió ningún archivo");
+          if (file.size > 50 * 1024 * 1024) throw new Error("El archivo es demasiado grande (máx. 50MB)");
           const buffer = Buffer.from(await file.arrayBuffer());
           text = await extractFromPdf(buffer);
         } else {
-          const body = await req.json();
-          const url = body.url as string;
-          if (!url) throw new Error("No URL provided");
+          let body: { url?: string };
+          try {
+            body = await req.json();
+          } catch {
+            throw new Error("Solicitud inválida");
+          }
+          const url = body.url;
+          if (!url) throw new Error("No se proporcionó una URL");
+
+          try {
+            new URL(url);
+          } catch {
+            throw new Error("La URL proporcionada no es válida");
+          }
 
           const inputType = detectInputType(url);
           if (inputType === "pdf-url") {
             const res = await fetch(url);
-            if (!res.ok) throw new Error(`Could not fetch PDF: ${res.status}`);
+            if (!res.ok) throw new Error(`No se pudo descargar el PDF (${res.status})`);
             const buffer = Buffer.from(await res.arrayBuffer());
             text = await extractFromPdf(buffer);
           } else if (inputType === "gdoc") {
@@ -122,11 +167,10 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        if (!text.trim()) throw new Error("No text could be extracted");
+        if (!text.trim()) throw new Error("No se pudo extraer texto del documento");
 
         send({ type: "status", message: "Texto extraído. Preparando audio...", progress: 15 });
 
-        // Split into chunks
         const chunks = splitIntoChunks(text);
         const totalChunks = chunks.length;
 
@@ -136,18 +180,18 @@ export async function POST(req: NextRequest) {
           progress: 20,
         });
 
-        // Process chunks with concurrency limit of 3
         const processChunk = async (chunk: string, index: number) => {
+          if (cancelled) return null;
           const spokenText = await processWithClaude(chunk);
+          if (cancelled) return null;
           const audioBuffer = await generateAudio(spokenText);
           return { index, audioBase64: audioBuffer.toString("base64") };
         };
 
-        // Process in batches of 3, streaming results in order
         const results: Map<number, string> = new Map();
         let nextToSend = 0;
 
-        for (let batchStart = 0; batchStart < totalChunks; batchStart += 3) {
+        for (let batchStart = 0; batchStart < totalChunks && !cancelled; batchStart += 3) {
           const batchEnd = Math.min(batchStart + 3, totalChunks);
           const batch = chunks.slice(batchStart, batchEnd).map((chunk, i) =>
             processChunk(chunk, batchStart + i)
@@ -156,11 +200,11 @@ export async function POST(req: NextRequest) {
           const batchResults = await Promise.all(batch);
 
           for (const result of batchResults) {
+            if (!result || cancelled) continue;
             results.set(result.index, result.audioBase64);
           }
 
-          // Send any chunks that are ready in order
-          while (results.has(nextToSend)) {
+          while (results.has(nextToSend) && !cancelled) {
             const progress = 20 + ((nextToSend + 1) / totalChunks) * 75;
             send({
               type: "audio_chunk",
@@ -178,15 +222,24 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        send({ type: "complete" });
+        if (!cancelled) send({ type: "complete" });
       } catch (error) {
-        send({
-          type: "error",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
+        if (!cancelled) {
+          send({
+            type: "error",
+            message: error instanceof Error ? error.message : "Error desconocido",
+          });
+        }
       } finally {
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Controller already closed
+        }
       }
+    },
+    cancel() {
+      cancelled = true;
     },
   });
 
