@@ -1,39 +1,246 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
-type ChunkInfo = { url: string; duration: number };
+// --- Types ---
+
 type Balance = {
   elevenlabs: { used: number; limit: number; remaining: number } | null;
   anthropic: { status: string } | null;
 };
 type Cost = { claude: number; elevenlabs: number; total: number };
+type Status = "idle" | "processing" | "playing" | "error";
+
+// --- Web Audio Engine ---
+
+class AudioEngine {
+  private ctx: AudioContext;
+  private gain: GainNode;
+  private source: AudioBufferSourceNode | null = null;
+  private buffers: AudioBuffer[] = [];
+  private raw: ArrayBuffer[] = [];
+  private chunkIdx = 0;
+  private offset = 0;
+  private playStart = 0;
+  private _playing = false;
+  private _rate = 1;
+  private _done = false;
+  private onUpdate: () => void;
+
+  constructor(onUpdate: () => void) {
+    this.ctx = new AudioContext();
+    this.gain = this.ctx.createGain();
+    this.gain.connect(this.ctx.destination);
+    this.onUpdate = onUpdate;
+  }
+
+  get playing() {
+    return this._playing;
+  }
+  get rate() {
+    return this._rate;
+  }
+  get hasAudio() {
+    return this.buffers.length > 0;
+  }
+
+  get currentTime(): number {
+    if (!this._playing) return this.chunkElapsed(this.chunkIdx) + this.offset;
+    const played = (this.ctx.currentTime - this.playStart) * this._rate;
+    return this.chunkElapsed(this.chunkIdx) + this.offset + played;
+  }
+
+  get duration(): number {
+    let d = 0;
+    for (const b of this.buffers) d += b.duration;
+    return d;
+  }
+
+  private chunkElapsed(upTo: number): number {
+    let t = 0;
+    for (let i = 0; i < upTo && i < this.buffers.length; i++) t += this.buffers[i].duration;
+    return t;
+  }
+
+  async addChunk(data: ArrayBuffer) {
+    this.raw.push(data);
+    // decodeAudioData detaches the buffer, so clone first
+    const buffer = await this.ctx.decodeAudioData(data.slice(0));
+    this.buffers.push(buffer);
+
+    if (this.buffers.length === 1) {
+      this.play();
+    } else if (this._playing && !this.source) {
+      // Was waiting for next chunk
+      this.playChunk(this.chunkIdx);
+    }
+    this.onUpdate();
+  }
+
+  play() {
+    if (this._playing) return;
+    this.ctx.resume();
+    this._playing = true;
+    this.playChunk(this.chunkIdx);
+    this.onUpdate();
+  }
+
+  pause() {
+    if (!this._playing) return;
+    const elapsed = (this.ctx.currentTime - this.playStart) * this._rate;
+    this.offset += elapsed;
+    this.stopSource();
+    this._playing = false;
+    this.onUpdate();
+  }
+
+  seek(time: number) {
+    for (let i = 0; i < this.buffers.length; i++) {
+      const start = this.chunkElapsed(i);
+      const end = start + this.buffers[i].duration;
+      if (time < end || i === this.buffers.length - 1) {
+        this.chunkIdx = i;
+        this.offset = Math.max(0, time - start);
+        if (this._playing) {
+          this.stopSource();
+          this.playChunk(i);
+        }
+        this.onUpdate();
+        return;
+      }
+    }
+  }
+
+  setRate(rate: number) {
+    if (this._playing && this.source) {
+      const elapsed = (this.ctx.currentTime - this.playStart) * this._rate;
+      this.offset += elapsed;
+      this.source.playbackRate.value = rate;
+      this.playStart = this.ctx.currentTime;
+    }
+    this._rate = rate;
+    this.onUpdate();
+  }
+
+  setDone() {
+    this._done = true;
+  }
+
+  downloadBlob(): Blob {
+    return new Blob(this.raw, { type: "audio/mpeg" });
+  }
+
+  destroy() {
+    this.stopSource();
+    this.ctx.close();
+  }
+
+  private playChunk(index: number) {
+    this.stopSource();
+
+    if (index >= this.buffers.length) {
+      if (this._done) {
+        this._playing = false;
+        this.onUpdate();
+      }
+      // else: waiting for next chunk, source stays null
+      return;
+    }
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.buffers[index];
+    src.playbackRate.value = this._rate;
+    src.connect(this.gain);
+
+    src.onended = () => {
+      if (this.chunkIdx === index && this._playing) {
+        this.chunkIdx = index + 1;
+        this.offset = 0;
+        this.playChunk(index + 1);
+      }
+    };
+
+    this.chunkIdx = index;
+    this.playStart = this.ctx.currentTime;
+    src.start(0, this.offset);
+    this.source = src;
+  }
+
+  private stopSource() {
+    try {
+      this.source?.stop();
+    } catch {
+      // Already stopped
+    }
+    this.source = null;
+  }
+}
+
+// --- Helpers ---
+
+function fmt(s: number): string {
+  return `${Math.floor(s / 60)}:${Math.floor(s % 60)
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+function fmtK(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(0)}K`;
+  return n.toString();
+}
+
+const RATES = [1, 1.25, 1.5, 2] as const;
+
+// --- Page ---
 
 export default function ReadPage() {
   const [url, setUrl] = useState("");
-  const [status, setStatus] = useState<"idle" | "processing" | "playing" | "error">("idle");
+  const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
+  const [balance, setBalance] = useState<Balance | null>(null);
+  const [cost, setCost] = useState<Cost | null>(null);
+
+  // Audio state (driven by engine callbacks)
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
   const [dur, setDur] = useState(0);
   const [rate, setRate] = useState(1);
   const [hasAudio, setHasAudio] = useState(false);
-  const [balance, setBalance] = useState<Balance | null>(null);
-  const [cost, setCost] = useState<Cost | null>(null);
 
-  const chunks = useRef<ChunkInfo[]>([]);
-  const buffers = useRef<ArrayBuffer[]>([]);
-  const audio = useRef<HTMLAudioElement | null>(null);
-  const rateRef = useRef(1);
-  const waiting = useRef(false);
-  const done = useRef(false);
-  const idx = useRef(0);
-  const fileInput = useRef<HTMLInputElement>(null);
+  const engineRef = useRef<AudioEngine | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const RATES = [1, 1.25, 1.5, 2] as const;
+  // Sync UI with audio engine state
+  const syncUI = useCallback(() => {
+    const e = engineRef.current;
+    if (!e) return;
+    setPlaying(e.playing);
+    setDur(e.duration);
+    setRate(e.rate);
+    setHasAudio(e.hasAudio);
+  }, []);
 
+  // Tick: update current time while playing
+  useEffect(() => {
+    if (playing) {
+      timerRef.current = setInterval(() => {
+        if (engineRef.current?.playing) {
+          setTime(engineRef.current.currentTime);
+        }
+      }, 100);
+    } else {
+      clearInterval(timerRef.current);
+      if (engineRef.current) setTime(engineRef.current.currentTime);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [playing]);
+
+  // Fetch balance on mount
   useEffect(() => {
     fetch("/api/balance")
       .then((r) => r.json())
@@ -41,92 +248,33 @@ export default function ReadPage() {
       .catch(() => {});
   }, []);
 
-  // --- Audio engine ---
-
-  function elapsed(i: number) {
-    let t = 0;
-    for (let j = 0; j < i; j++) t += chunks.current[j].duration;
-    return t;
-  }
-
-  function totalDur() {
-    let t = 0;
-    for (const c of chunks.current) t += c.duration;
-    return t;
-  }
-
-  function playAt(index: number, seekTo = 0) {
-    if (index >= chunks.current.length) {
-      if (done.current) setPlaying(false);
-      else waiting.current = true;
-      return;
-    }
-
-    waiting.current = false;
-    idx.current = index;
-    audio.current?.pause();
-
-    const el = new Audio(chunks.current[index].url);
-    el.playbackRate = rateRef.current;
-    el.ontimeupdate = () => setTime(elapsed(idx.current) + el.currentTime);
-    el.onloadedmetadata = () => {
-      chunks.current[index].duration = el.duration;
-      setDur(totalDur());
-      el.currentTime = seekTo;
-      el.play().catch(() => {});
-    };
-    el.onended = () => playAt(index + 1);
-
-    audio.current = el;
-    setPlaying(true);
-  }
-
-  function addChunk(buffer: ArrayBuffer) {
-    buffers.current.push(buffer);
-    const blob = new Blob([buffer], { type: "audio/mpeg" });
-    const chunkUrl = URL.createObjectURL(blob);
-    const i = chunks.current.length;
-    chunks.current.push({ url: chunkUrl, duration: 0 });
-
-    const probe = new Audio(chunkUrl);
-    probe.onloadedmetadata = () => {
-      if (chunks.current[i]) {
-        chunks.current[i].duration = probe.duration;
-        setDur(totalDur());
-      }
-    };
-
-    if (i === 0) {
-      setHasAudio(true);
-      setStatus("playing");
-    } else if (waiting.current) {
-      playAt(i);
-    }
-  }
-
-  function cleanup() {
-    audio.current?.pause();
-    chunks.current.forEach((c) => URL.revokeObjectURL(c.url));
-    chunks.current = [];
-    buffers.current = [];
-    idx.current = 0;
-    waiting.current = false;
-    done.current = false;
-  }
-
   // --- Conversion ---
 
   async function convert(body: BodyInit, headers: Record<string, string> = {}) {
-    cleanup();
+    // Cleanup previous
+    engineRef.current?.destroy();
+    const engine = new AudioEngine(syncUI);
+    engineRef.current = engine;
+
     setStatus("processing");
     setMessage("Connecting...");
     setProgress(0);
     setError("");
     setHasAudio(false);
     setCost(null);
+    setTime(0);
+    setDur(0);
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
     try {
-      const res = await fetch("/api/convert", { method: "POST", headers, body });
+      const res = await fetch("/api/convert", {
+        method: "POST",
+        headers,
+        body,
+        signal: ctrl.signal,
+      });
       if (!res.ok || !res.body) throw new Error(`Server error: ${res.status}`);
 
       const reader = res.body.getReader();
@@ -134,8 +282,8 @@ export default function ReadPage() {
       let buf = "";
 
       while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
+        const { done, value } = await reader.read();
+        if (done) break;
 
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
@@ -143,7 +291,6 @@ export default function ReadPage() {
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
-
           let evt: Record<string, unknown>;
           try {
             evt = JSON.parse(line.slice(6));
@@ -151,37 +298,57 @@ export default function ReadPage() {
             continue;
           }
 
-          if (evt.type === "status") {
-            setMessage((evt.message as string) || "");
-            setProgress((evt.progress as number) || 0);
-          } else if (evt.type === "audio_chunk" && evt.data) {
-            const raw = atob(evt.data as string);
-            const bytes = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-            addChunk(bytes.buffer);
-          } else if (evt.type === "cost") {
-            setCost({
-              claude: evt.claude as number,
-              elevenlabs: evt.elevenlabs as number,
-              total: evt.total as number,
-            });
-          } else if (evt.type === "complete") {
-            done.current = true;
-            setMessage("Done");
-            setProgress(100);
-            fetch("/api/balance")
-              .then((r) => r.json())
-              .then(setBalance)
-              .catch(() => {});
-          } else if (evt.type === "error") {
-            throw new Error((evt.message as string) || "Unknown error");
+          switch (evt.type) {
+            case "status":
+              setMessage((evt.message as string) || "");
+              setProgress((evt.progress as number) || 0);
+              break;
+
+            case "audio_chunk": {
+              if (!evt.data) break;
+              const raw = atob(evt.data as string);
+              const bytes = new Uint8Array(raw.length);
+              for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+              await engine.addChunk(bytes.buffer);
+              if (!hasAudio) setStatus("playing");
+              break;
+            }
+
+            case "cost":
+              setCost({
+                claude: evt.claude as number,
+                elevenlabs: evt.elevenlabs as number,
+                total: evt.total as number,
+              });
+              break;
+
+            case "complete":
+              engine.setDone();
+              setMessage("Done");
+              setProgress(100);
+              fetch("/api/balance")
+                .then((r) => r.json())
+                .then(setBalance)
+                .catch(() => {});
+              break;
+
+            case "error":
+              throw new Error((evt.message as string) || "Unknown error");
           }
         }
       }
     } catch (err) {
+      if (ctrl.signal.aborted) return;
       setStatus("error");
       setError(err instanceof Error ? err.message : "Unknown error");
     }
+  }
+
+  function cancel() {
+    abortRef.current?.abort();
+    setStatus("idle");
+    setMessage("");
+    setProgress(0);
   }
 
   // --- Handlers ---
@@ -200,57 +367,31 @@ export default function ReadPage() {
   }
 
   function togglePlay() {
-    const a = audio.current;
-    if (!a) {
-      if (chunks.current.length > 0) playAt(0);
-      return;
-    }
-    if (a.paused) {
-      a.play();
-      setPlaying(true);
-    } else {
-      a.pause();
-      setPlaying(false);
-    }
+    const e = engineRef.current;
+    if (!e) return;
+    if (e.playing) e.pause();
+    else e.play();
   }
 
   function seek(e: React.ChangeEvent<HTMLInputElement>) {
-    const t = parseFloat(e.target.value);
-    let cum = 0;
-    for (let i = 0; i < chunks.current.length; i++) {
-      if (cum + chunks.current[i].duration > t || i === chunks.current.length - 1) {
-        playAt(i, Math.max(0, t - cum));
-        return;
-      }
-      cum += chunks.current[i].duration;
-    }
+    engineRef.current?.seek(parseFloat(e.target.value));
   }
 
   function cycleRate() {
-    const next = RATES[(RATES.indexOf(rateRef.current as (typeof RATES)[number]) + 1) % RATES.length];
-    rateRef.current = next;
-    setRate(next);
-    if (audio.current) audio.current.playbackRate = next;
+    const e = engineRef.current;
+    if (!e) return;
+    const idx = RATES.indexOf(e.rate as (typeof RATES)[number]);
+    e.setRate(RATES[(idx + 1) % RATES.length]);
   }
 
   function download() {
-    if (!buffers.current.length) return;
-    const blob = new Blob(buffers.current, { type: "audio/mpeg" });
+    const blob = engineRef.current?.downloadBlob();
+    if (!blob) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "vread-audio.mp3";
     a.click();
     URL.revokeObjectURL(a.href);
-  }
-
-  function fmt(s: number) {
-    return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, "0")}`;
-  }
-
-  function fmtK(n: number) {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1000) return `${(n / 1000).toFixed(0)}K`;
-    return n.toString();
   }
 
   // --- UI ---
@@ -259,7 +400,10 @@ export default function ReadPage() {
     <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-8 pb-48 max-w-2xl mx-auto">
       {/* Header */}
       <div className="flex items-center justify-between mb-8">
-        <a href="/" className="flex items-center gap-2 text-neutral-500 hover:text-white transition-colors min-h-[44px]">
+        <a
+          href="/"
+          className="flex items-center gap-2 text-neutral-500 hover:text-white transition-colors min-h-[44px]"
+        >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
@@ -276,13 +420,8 @@ export default function ReadPage() {
         <div className="flex gap-3 mb-6 text-xs">
           <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
             <span className="text-neutral-500 block">ElevenLabs</span>
-            <span className="text-white tabular-nums">
-              {fmtK(balance.elevenlabs.remaining)} chars
-            </span>
-            <span className="text-neutral-600">
-              {" / "}
-              {fmtK(balance.elevenlabs.limit)}
-            </span>
+            <span className="text-white tabular-nums">{fmtK(balance.elevenlabs.remaining)} chars</span>
+            <span className="text-neutral-600"> / {fmtK(balance.elevenlabs.limit)}</span>
           </div>
           <div className="flex-1 bg-neutral-900 border border-white/10 rounded-lg px-3 py-2.5">
             <span className="text-neutral-500 block">Claude</span>
@@ -293,6 +432,7 @@ export default function ReadPage() {
         </div>
       )}
 
+      {/* Input */}
       <div className="space-y-3">
         <input
           type="url"
@@ -312,20 +452,38 @@ export default function ReadPage() {
           >
             {status === "processing" ? "Processing..." : "Convert to Audio"}
           </button>
-          <button
-            onClick={() => fileInput.current?.click()}
-            disabled={status === "processing"}
-            className="bg-neutral-900 border border-white/10 hover:bg-neutral-800 disabled:opacity-30 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
-            aria-label="Upload PDF"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-          </button>
-          <input ref={fileInput} type="file" accept=".pdf" onChange={upload} className="hidden" />
+
+          {status === "processing" ? (
+            <button
+              onClick={cancel}
+              className="bg-neutral-900 border border-red-500/30 hover:bg-red-500/10 text-red-400 font-medium px-5 py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
+              aria-label="Cancel"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="bg-neutral-900 border border-white/10 hover:bg-neutral-800 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors active:scale-[0.98]"
+              aria-label="Upload PDF"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                />
+              </svg>
+            </button>
+          )}
+          <input ref={fileInputRef} type="file" accept=".pdf" onChange={upload} className="hidden" />
         </div>
       </div>
 
+      {/* Progress */}
       {status === "processing" && (
         <div className="mt-8 space-y-3">
           <div className="flex justify-between text-sm text-neutral-500">
@@ -341,12 +499,14 @@ export default function ReadPage() {
         </div>
       )}
 
+      {/* Error */}
       {status === "error" && (
         <div className="mt-8 bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl text-sm">
           {error}
         </div>
       )}
 
+      {/* Audio Player */}
       {hasAudio && (
         <div
           className="fixed bottom-0 left-0 right-0 bg-neutral-900/95 backdrop-blur-sm border-t border-white/10 px-4 pt-4 sm:static sm:mt-8 sm:rounded-xl sm:border sm:border-white/10 sm:bg-neutral-900 sm:pb-4"
@@ -397,7 +557,12 @@ export default function ReadPage() {
                 aria-label="Download MP3"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                  />
                 </svg>
               </button>
             </div>
@@ -409,10 +574,10 @@ export default function ReadPage() {
             </p>
           )}
 
-          {/* Cost — tiny, below player controls */}
           {cost && (
             <p className="text-[10px] text-neutral-600 mt-2 text-center tabular-nums">
-              Cost: ${cost.total.toFixed(3)} (Claude ${cost.claude.toFixed(3)} + ElevenLabs ${cost.elevenlabs.toFixed(3)})
+              Cost: ${cost.total.toFixed(3)} (Claude ${cost.claude.toFixed(3)} + ElevenLabs $
+              {cost.elevenlabs.toFixed(3)})
             </p>
           )}
         </div>

@@ -6,7 +6,13 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "vread.me — Listen to any document",
-  description: "Turn documents and web pages into spoken audio. Paste a link or upload a PDF and start listening in seconds.",
+  description:
+    "Turn documents and web pages into spoken audio. Paste a link or upload a PDF and start listening in seconds.",
+  icons: {
+    icon: [
+      { url: "/favicon.svg", type: "image/svg+xml" },
+    ],
+  },
 };
 
 export const viewport: Viewport = {
