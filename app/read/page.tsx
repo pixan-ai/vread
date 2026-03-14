@@ -1,334 +1,323 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef } from "react";
 
-type Status = "idle" | "processing" | "playing" | "error";
+type ChunkInfo = { url: string; duration: number };
 
 export default function ReadPage() {
   const [url, setUrl] = useState("");
-  const [status, setStatus] = useState<Status>("idle");
-  const [statusMessage, setStatusMessage] = useState("");
+  const [status, setStatus] = useState<"idle" | "processing" | "playing" | "error">("idle");
+  const [message, setMessage] = useState("");
   const [progress, setProgress] = useState(0);
-  const [errorMessage, setErrorMessage] = useState("");
+  const [error, setError] = useState("");
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [dur, setDur] = useState(0);
+  const [rate, setRate] = useState(1);
+  const [hasAudio, setHasAudio] = useState(false);
 
-  // Audio state
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioChunksRef = useRef<ArrayBuffer[]>([]);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const [showPlayer, setShowPlayer] = useState(false);
-  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const chunks = useRef<ChunkInfo[]>([]);
+  const buffers = useRef<ArrayBuffer[]>([]);
+  const audio = useRef<HTMLAudioElement | null>(null);
+  const rateRef = useRef(1);
+  const waiting = useRef(false);
+  const done = useRef(false);
+  const idx = useRef(0);
+  const fileInput = useRef<HTMLInputElement>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const RATES = [1, 1.25, 1.5, 2];
 
-  const rates = [1, 1.25, 1.5, 2];
+  // --- Audio engine: sequential chunk playback ---
 
-  // Combine all audio chunks into a single blob URL for <audio> element
-  const buildAudioUrl = useCallback((chunks: ArrayBuffer[]) => {
-    const blob = new Blob(chunks, { type: "audio/mpeg" });
-    return URL.createObjectURL(blob);
-  }, []);
+  function elapsed(i: number) {
+    let t = 0;
+    for (let j = 0; j < i; j++) t += chunks.current[j].duration;
+    return t;
+  }
 
-  const startConversion = useCallback(
-    async (body: BodyInit, headers: HeadersInit = {}) => {
-      setStatus("processing");
-      setStatusMessage("Iniciando...");
-      setProgress(0);
-      setErrorMessage("");
-      setShowPlayer(false);
-      audioChunksRef.current = [];
+  function totalDur() {
+    let t = 0;
+    for (const c of chunks.current) t += c.duration;
+    return t;
+  }
 
-      // Initialize AudioContext on user gesture for iOS Safari
-      if (!audioContextRef.current) {
-        audioContextRef.current = new AudioContext();
+  function playAt(index: number, seekTo = 0) {
+    if (index >= chunks.current.length) {
+      if (done.current) setPlaying(false);
+      else waiting.current = true;
+      return;
+    }
+
+    waiting.current = false;
+    idx.current = index;
+    audio.current?.pause();
+
+    const el = new Audio(chunks.current[index].url);
+    el.playbackRate = rateRef.current;
+    el.ontimeupdate = () => setTime(elapsed(idx.current) + el.currentTime);
+    el.onloadedmetadata = () => {
+      chunks.current[index].duration = el.duration;
+      setDur(totalDur());
+      el.currentTime = seekTo;
+      el.play().catch(() => {});
+    };
+    el.onended = () => playAt(index + 1);
+
+    audio.current = el;
+    setPlaying(true);
+  }
+
+  function addChunk(buffer: ArrayBuffer) {
+    buffers.current.push(buffer);
+    const blob = new Blob([buffer], { type: "audio/mpeg" });
+    const chunkUrl = URL.createObjectURL(blob);
+    const i = chunks.current.length;
+    chunks.current.push({ url: chunkUrl, duration: 0 });
+
+    // Probe duration without playing
+    const probe = new Audio(chunkUrl);
+    probe.onloadedmetadata = () => {
+      if (chunks.current[i]) {
+        chunks.current[i].duration = probe.duration;
+        setDur(totalDur());
       }
-      // Resume if suspended (iOS requirement)
-      if (audioContextRef.current.state === "suspended") {
-        await audioContextRef.current.resume();
-      }
+    };
 
-      try {
-        const res = await fetch("/api/convert", {
-          method: "POST",
-          headers: headers as Record<string, string>,
-          body,
-        });
+    if (i === 0) {
+      setHasAudio(true);
+      setStatus("playing");
+      playAt(0);
+    } else if (waiting.current) {
+      playAt(i);
+    }
+  }
 
-        if (!res.ok || !res.body) {
-          throw new Error(`Server error: ${res.status}`);
-        }
+  function cleanup() {
+    audio.current?.pause();
+    chunks.current.forEach(c => URL.revokeObjectURL(c.url));
+    chunks.current = [];
+    buffers.current = [];
+    idx.current = 0;
+    waiting.current = false;
+    done.current = false;
+  }
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let firstChunkReceived = false;
+  // --- Conversion ---
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+  async function convert(body: BodyInit, headers: Record<string, string> = {}) {
+    cleanup();
+    setStatus("processing");
+    setMessage("Iniciando...");
+    setProgress(0);
+    setError("");
+    setHasAudio(false);
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
+    try {
+      const res = await fetch("/api/convert", { method: "POST", headers, body });
+      if (!res.ok || !res.body) throw new Error(`Server error: ${res.status}`);
 
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const data = JSON.parse(line.slice(6));
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
 
-            if (data.type === "status") {
-              setStatusMessage(data.message);
-              setProgress(data.progress);
-            } else if (data.type === "audio_chunk") {
-              const binary = atob(data.data);
-              const bytes = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-              }
-              audioChunksRef.current.push(bytes.buffer);
+      while (true) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
 
-              // Show player and start playing on first chunk
-              if (!firstChunkReceived) {
-                firstChunkReceived = true;
-                setShowPlayer(true);
-                setStatus("playing");
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
 
-                // Create audio element with first chunk
-                const audioUrl = buildAudioUrl([bytes.buffer]);
-                const audio = new Audio(audioUrl);
-                audio.playbackRate = playbackRate;
-                audioElementRef.current = audio;
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const evt = JSON.parse(line.slice(6));
 
-                audio.addEventListener("timeupdate", () => {
-                  setCurrentTime(audio.currentTime);
-                });
-                audio.addEventListener("loadedmetadata", () => {
-                  setDuration(audio.duration);
-                });
-
-                await audio.play();
-                setIsPlaying(true);
-              } else {
-                // Rebuild audio element with all chunks so far, maintaining position
-                const prevAudio = audioElementRef.current;
-                const wasPlaying = prevAudio && !prevAudio.paused;
-                const prevTime = prevAudio?.currentTime || 0;
-
-                const audioUrl = buildAudioUrl(audioChunksRef.current);
-                const audio = new Audio(audioUrl);
-                audio.playbackRate = playbackRate;
-                audio.addEventListener("timeupdate", () => {
-                  setCurrentTime(audio.currentTime);
-                });
-                audio.addEventListener("loadedmetadata", () => {
-                  setDuration(audio.duration);
-                  audio.currentTime = prevTime;
-                  if (wasPlaying) audio.play();
-                });
-
-                if (prevAudio) {
-                  prevAudio.pause();
-                  URL.revokeObjectURL(prevAudio.src);
-                }
-                audioElementRef.current = audio;
-              }
-            } else if (data.type === "complete") {
-              setStatusMessage("Listo");
-              setProgress(100);
-            } else if (data.type === "error") {
-              throw new Error(data.message);
-            }
+          if (evt.type === "status") {
+            setMessage(evt.message);
+            setProgress(evt.progress);
+          } else if (evt.type === "audio_chunk") {
+            const raw = atob(evt.data);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            addChunk(bytes.buffer);
+          } else if (evt.type === "complete") {
+            done.current = true;
+            setMessage("Listo");
+            setProgress(100);
+          } else if (evt.type === "error") {
+            throw new Error(evt.message);
           }
         }
-      } catch (err) {
-        setStatus("error");
-        setErrorMessage(err instanceof Error ? err.message : "Error desconocido");
       }
-    },
-    [buildAudioUrl, playbackRate]
-  );
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "Error desconocido");
+    }
+  }
 
-  const handleSubmit = () => {
+  // --- Handlers ---
+
+  function submit() {
     if (!url.trim()) return;
-    startConversion(JSON.stringify({ url: url.trim() }), {
-      "Content-Type": "application/json",
-    });
-  };
+    convert(JSON.stringify({ url: url.trim() }), { "Content-Type": "application/json" });
+  }
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  function upload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const formData = new FormData();
-    formData.append("file", file);
-    startConversion(formData);
-  };
+    const fd = new FormData();
+    fd.append("file", file);
+    convert(fd);
+  }
 
-  const togglePlayPause = () => {
-    const audio = audioElementRef.current;
-    if (!audio) return;
-    if (audio.paused) {
-      audio.play();
-      setIsPlaying(true);
+  function togglePlay() {
+    if (!audio.current) return;
+    if (audio.current.paused) {
+      audio.current.play();
+      setPlaying(true);
     } else {
-      audio.pause();
-      setIsPlaying(false);
+      audio.current.pause();
+      setPlaying(false);
     }
-  };
+  }
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const audio = audioElementRef.current;
-    if (!audio) return;
-    const time = parseFloat(e.target.value);
-    audio.currentTime = time;
-    setCurrentTime(time);
-  };
-
-  const cycleRate = () => {
-    const nextIndex = (rates.indexOf(playbackRate) + 1) % rates.length;
-    const newRate = rates[nextIndex];
-    setPlaybackRate(newRate);
-    if (audioElementRef.current) {
-      audioElementRef.current.playbackRate = newRate;
+  function seek(e: React.ChangeEvent<HTMLInputElement>) {
+    const t = parseFloat(e.target.value);
+    let cum = 0;
+    for (let i = 0; i < chunks.current.length; i++) {
+      if (cum + chunks.current[i].duration > t || i === chunks.current.length - 1) {
+        playAt(i, Math.max(0, t - cum));
+        return;
+      }
+      cum += chunks.current[i].duration;
     }
-  };
+  }
 
-  const downloadAudio = () => {
-    if (audioChunksRef.current.length === 0) return;
-    const blob = new Blob(audioChunksRef.current, { type: "audio/mpeg" });
-    const url = URL.createObjectURL(blob);
+  function cycleRate() {
+    const next = RATES[(RATES.indexOf(rateRef.current) + 1) % RATES.length];
+    rateRef.current = next;
+    setRate(next);
+    if (audio.current) audio.current.playbackRate = next;
+  }
+
+  function download() {
+    if (!buffers.current.length) return;
+    const blob = new Blob(buffers.current, { type: "audio/mpeg" });
     const a = document.createElement("a");
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = "vread-audio.mp3";
     a.click();
-    URL.revokeObjectURL(url);
-  };
+    URL.revokeObjectURL(a.href);
+  }
 
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
-  };
+  function fmt(s: number) {
+    return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, "0")}`;
+  }
+
+  // --- UI ---
 
   return (
     <main className="min-h-dvh flex flex-col px-4 sm:px-6 pt-12 pb-40 max-w-2xl mx-auto">
-      {/* Header */}
       <a href="/" className="text-xl font-bold mb-10 inline-block">
-        vread<span className="text-[var(--accent)]">.me</span>
+        vread<span className="text-indigo-500">.me</span>
       </a>
 
-      {/* URL Input */}
       <div className="space-y-3">
         <input
           type="url"
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+          onChange={e => setUrl(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
           placeholder="Pega un link (web, PDF, Google Doc)"
-          className="w-full bg-[var(--bg-card)] border border-white/10 rounded-xl px-4 py-4 text-base placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] transition-colors"
+          className="w-full bg-neutral-900 border border-white/10 rounded-xl px-4 py-4 text-base placeholder:text-neutral-500 focus:outline-none focus:border-indigo-500 transition-colors"
           disabled={status === "processing"}
         />
 
         <div className="flex gap-3">
           <button
-            onClick={handleSubmit}
+            onClick={submit}
             disabled={!url.trim() || status === "processing"}
-            className="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-4 rounded-xl text-base transition-colors"
+            className="flex-1 bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium py-4 rounded-xl text-base transition-colors"
           >
             Convertir a Audio
           </button>
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => fileInput.current?.click()}
             disabled={status === "processing"}
-            className="bg-[var(--bg-card)] border border-white/10 hover:bg-[var(--bg-hover)] disabled:opacity-40 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors"
+            className="bg-neutral-900 border border-white/10 hover:bg-neutral-800 disabled:opacity-40 text-white font-medium px-5 py-4 rounded-xl text-base transition-colors"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
             </svg>
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            onChange={handleFileUpload}
-            className="hidden"
-          />
+          <input ref={fileInput} type="file" accept=".pdf" onChange={upload} className="hidden" />
         </div>
       </div>
 
-      {/* Progress */}
       {status === "processing" && (
         <div className="mt-8 space-y-3">
-          <div className="flex justify-between text-sm text-[var(--text-muted)]">
-            <span>{statusMessage}</span>
+          <div className="flex justify-between text-sm text-neutral-400">
+            <span>{message}</span>
             <span>{progress}%</span>
           </div>
-          <div className="h-1.5 bg-[var(--bg-card)] rounded-full overflow-hidden">
+          <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden">
             <div
-              className="h-full bg-[var(--accent)] rounded-full transition-all duration-500"
+              className="h-full bg-indigo-500 rounded-full transition-all duration-500"
               style={{ width: `${progress}%` }}
             />
           </div>
         </div>
       )}
 
-      {/* Error */}
       {status === "error" && (
         <div className="mt-8 bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl text-sm">
-          {errorMessage}
+          {error}
         </div>
       )}
 
-      {/* Audio Player — sticky bottom on mobile */}
-      {showPlayer && (
-        <div className="fixed bottom-0 left-0 right-0 bg-[var(--bg-card)] border-t border-white/10 px-4 py-4 sm:static sm:mt-8 sm:rounded-xl sm:border sm:border-white/10">
-          {/* Progress bar */}
+      {hasAudio && (
+        <div className="fixed bottom-0 left-0 right-0 bg-neutral-900 border-t border-white/10 px-4 py-4 sm:static sm:mt-8 sm:rounded-xl sm:border sm:border-white/10">
           <input
             type="range"
             min={0}
-            max={duration || 0}
+            max={dur || 0}
             step={0.1}
-            value={currentTime}
-            onChange={handleSeek}
-            className="w-full h-1.5 mb-3 accent-[var(--accent)] cursor-pointer"
+            value={time}
+            onChange={seek}
+            className="w-full h-1.5 mb-3 accent-indigo-500 cursor-pointer"
           />
 
           <div className="flex items-center justify-between">
-            {/* Time */}
-            <span className="text-xs text-[var(--text-muted)] w-20">
-              {formatTime(currentTime)} / {formatTime(duration)}
+            <span className="text-xs text-neutral-400 w-20">
+              {fmt(time)} / {fmt(dur)}
             </span>
 
-            {/* Controls */}
-            <div className="flex items-center gap-4">
-              <button
-                onClick={togglePlayPause}
-                className="w-12 h-12 flex items-center justify-center bg-[var(--accent)] rounded-full hover:bg-[var(--accent-hover)] transition-colors"
-              >
-                {isPlaying ? (
-                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                    <rect x="6" y="4" width="4" height="16" />
-                    <rect x="14" y="4" width="4" height="16" />
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                    <polygon points="5,3 19,12 5,21" />
-                  </svg>
-                )}
-              </button>
-            </div>
+            <button
+              onClick={togglePlay}
+              className="w-12 h-12 flex items-center justify-center bg-indigo-500 rounded-full hover:bg-indigo-400 transition-colors"
+            >
+              {playing ? (
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="4" width="4" height="16" />
+                  <rect x="14" y="4" width="4" height="16" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                  <polygon points="5,3 19,12 5,21" />
+                </svg>
+              )}
+            </button>
 
-            {/* Rate + Download */}
             <div className="flex items-center gap-3">
               <button
                 onClick={cycleRate}
-                className="text-xs font-medium text-[var(--text-muted)] hover:text-white bg-[var(--bg-hover)] px-2.5 py-1.5 rounded-lg transition-colors"
+                className="text-xs font-medium text-neutral-400 hover:text-white bg-neutral-800 px-2.5 py-1.5 rounded-lg transition-colors"
               >
-                {playbackRate}x
+                {rate}x
               </button>
               <button
-                onClick={downloadAudio}
-                className="text-[var(--text-muted)] hover:text-white transition-colors"
+                onClick={download}
+                className="text-neutral-400 hover:text-white transition-colors"
                 title="Descargar MP3"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -338,10 +327,9 @@ export default function ReadPage() {
             </div>
           </div>
 
-          {/* Status during processing */}
           {status === "processing" && (
-            <p className="text-xs text-[var(--text-muted)] mt-2 text-center">
-              {statusMessage} — {progress}%
+            <p className="text-xs text-neutral-400 mt-2 text-center">
+              {message} — {progress}%
             </p>
           )}
         </div>

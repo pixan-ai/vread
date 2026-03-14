@@ -40,20 +40,23 @@ export async function extractFromWebpage(url: string): Promise<string> {
   return article.textContent;
 }
 
-// Split text into chunks of roughly `maxChars` characters at sentence boundaries
 export function splitIntoChunks(text: string, maxChars = 4000): string[] {
-  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/);
+  const clean = text.replace(/\n+/g, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  if (clean.length <= maxChars) return [clean];
+
   const chunks: string[] = [];
   let current = "";
 
-  for (const sentence of sentences) {
-    if (current.length + sentence.length > maxChars && current.length > 0) {
-      chunks.push(current.trim());
-      current = "";
+  for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
+    if (current.length + sentence.length + 1 > maxChars && current) {
+      chunks.push(current);
+      current = sentence;
+    } else {
+      current += (current ? " " : "") + sentence;
     }
-    current += sentence + " ";
   }
-  if (current.trim()) chunks.push(current.trim());
+  if (current) chunks.push(current);
 
   return chunks;
 }
