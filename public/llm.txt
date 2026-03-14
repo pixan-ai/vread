@@ -1,0 +1,62 @@
+# vread.me
+
+> Document-to-audio web service. Converts web pages, PDFs, and Google Docs into spoken Spanish audio.
+
+## What this site does
+
+vread.me takes a URL or uploaded PDF, extracts the text content, processes it for natural narration using Claude (Anthropic), and generates spoken audio in Spanish using ElevenLabs text-to-speech. The user starts listening within seconds while the rest of the document continues processing in the background.
+
+## Pages
+
+- `/` — Landing page. Minimal hero with call-to-action.
+- `/read` — Main application. User pastes a URL or uploads a PDF, clicks "Convertir a Audio", and listens via an inline audio player.
+- `/labV1` — Animation experiment: particle text morph effect.
+- `/labV2` — Animation experiment: word-by-word consumption effect.
+
+## Supported inputs
+
+- URLs to web articles (extracted via Mozilla Readability)
+- URLs to public Google Docs (exported as plain text)
+- URLs to PDF files (extracted via pdf-parse)
+- Direct PDF file uploads (max 50MB)
+
+## How the pipeline works
+
+1. Text is extracted from the input source.
+2. Text is split into ~2000-character chunks at sentence boundaries.
+3. Each chunk is sent to Claude Sonnet 4, which rewrites it for spoken narration: converting tables to descriptions, bullets to prose, numbers to words, and adding natural rhythm.
+4. The processed text is sent to ElevenLabs Turbo v2.5 to generate MP3 audio.
+5. Audio chunks stream to the browser via Server-Sent Events (SSE) as they complete.
+6. Up to 3 chunks process in parallel for speed.
+
+## Technical details
+
+- Built with Next.js 15 (App Router), TypeScript, Tailwind CSS 4.
+- Single app, no microservices, no database, no authentication.
+- All external API calls (Claude, ElevenLabs) use native fetch — no SDKs.
+- Audio player uses sequential HTML5 Audio elements per chunk, with cross-chunk seeking.
+- Monochrome black-and-white design with Inter font.
+- Mobile-first, iOS Safari compatible.
+- Deployed on Railway.
+
+## API
+
+The only API endpoint is `POST /api/convert`.
+
+Accepts either:
+- JSON body: `{ "url": "https://..." }`
+- Multipart form data with a `file` field (PDF)
+
+Returns a Server-Sent Events stream with events:
+- `status` — progress updates with message and percentage
+- `audio_chunk` — base64-encoded MP3 audio segment
+- `complete` — all chunks processed
+- `error` — error message
+
+## Built by
+
+[Pixan.ai](https://pixan.ai) — Alfredo Arenas.
+
+## Contact
+
+For questions about the service, reach out via [pixan.ai](https://pixan.ai).
